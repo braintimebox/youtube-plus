@@ -1,0 +1,9 @@
+Package: com.yourname.ytnativesharehybrid
+Name: YTNativeShareHybrid
+Depends: mobilesubstrate, com.dayanch96.ytlite
+Version: 1.0.0
+Architecture: iphone-arm
+Maintainer: Oleksandr
+Author: Oleksandr
+Section: Tweaks
+Description: Hybrid native iOS Share Sheet with timestamp extraction for YouTube Plus

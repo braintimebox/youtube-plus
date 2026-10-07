@@ -1,0 +1,5 @@
+# Project: yt-native-share-hybrid
+name = "yt-native-share-hybrid"
+target = "ios"
+description = "Native iOS Share Sheet hybrid with timestamp extraction for YouTube iOS"
+version = "1.0.0"
