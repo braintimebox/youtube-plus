@@ -26,12 +26,10 @@ jobs:
           set -e
           mkdir -p "$THEOS/sdks"
           git clone --depth 1 https://github.com/theos/sdks.git /tmp/theos-sdks
-          cp /tmp/theos-sdks/*.tar.xz "$THEOS/sdks/" || true
-          if [ ! -f "$THEOS/sdks/iPhoneOS16.5.sdk.tar.xz" ]; then
-            curl -L -o "$THEOS/sdks/iPhoneOS16.5.sdk.tar.xz" \
-              https://github.com/theos/sdks/raw/master/iPhoneOS16.5.sdk.tar.xz
-          fi
-          tar -xJf "$THEOS/sdks/iPhoneOS16.5.sdk.tar.xz" -C "$THEOS/sdks"
+          # В репо SDK хранятся РАЗЛОЖЕННЫМИ ДИРЕКТОРИЯМИ, а не тарболлами.
+          cp -R /tmp/theos-sdks/iPhoneOS16.5.sdk "$THEOS/sdks/iPhoneOS16.5.sdk"
+          test -f "$THEOS/sdks/iPhoneOS16.5.sdk/SDKSettings.plist"
+          echo "SDK installed:" && ls "$THEOS/sdks"
 
       - name: Build tweak (real Theos build)
         run: |

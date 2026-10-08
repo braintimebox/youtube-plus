@@ -87,56 +87,88 @@ static void copyToPasteboard(NSString *string) {
 
 %end
 
+// ── Извлечение URL из отладочного описания share-entity (порт extractUrlFromDescription
+//    из jkhsjdhjs/youtube-native-share — работает без protobuf-зависимости) ──────
+typedef NS_ENUM(NSInteger, ShareEntityType) {
+    ShareEntityFieldVideo     = 1,
+    ShareEntityFieldPlaylist  = 2,
+    ShareEntityFieldChannel   = 3,
+    ShareEntityFieldPost      = 6,
+    ShareEntityFieldClip      = 8,
+    ShareEntityFieldShortFlag = 10
+};
+
+static NSString *ytURLForField(NSString *desc, ShareEntityType field, NSString *urlFmt) {
+    NSRegularExpression *re = [NSRegularExpression
+        regularExpressionWithPattern:
+            [NSString stringWithFormat:@"\\b%ld: \"([^\"]+)\"", (long)field]
+                              options:0 error:nil];
+    NSTextCheckingResult *m = [re firstMatchInString:desc options:0
+                                               range:NSMakeRange(0, desc.length)];
+    if (!m) return nil;
+    NSString *value = [desc substringWithRange:[m rangeAtIndex:1]];
+    return [NSString stringWithFormat:urlFmt, value];
+}
+
+static NSString *extractUrlFromDescription(NSString *desc) {
+    if (desc.length == 0) return nil;
+
+    // Shorts: флаг стоит отдельным полем.
+    NSRegularExpression *shortRe =
+        [NSRegularExpression regularExpressionWithPattern:
+            [NSString stringWithFormat:@"\\b%ld: ", (long)ShareEntityFieldShortFlag]
+                                                  options:0 error:nil];
+    BOOL isShort = [shortRe firstMatchInString:desc options:0
+                                         range:NSMakeRange(0, desc.length)] != nil;
+
+    NSString *url;
+    if ((url = ytURLForField(desc, ShareEntityFieldPlaylist, @"%@"))) {
+        if (![url hasPrefix:@"PL"] && ![url hasPrefix:@"FL"])
+            url = [url stringByAppendingString:@"&playnext=1"];
+        return [@"https://www.youtube.com/playlist?list=" stringByAppendingString:url];
+    }
+    if ((url = ytURLForField(desc, ShareEntityFieldChannel,
+                             @"https://www.youtube.com/channel/%@"))) return url;
+    if ((url = ytURLForField(desc, ShareEntityFieldPost,
+                             @"https://www.youtube.com/post/%@")))     return url;
+    if ((url = ytURLForField(desc, ShareEntityFieldVideo,
+                             isShort ? @"https://www.youtube.com/shorts/%@"
+                                     : @"https://www.youtube.com/watch?v=%@"))) return url;
+    return nil;
+}
+
 // ── Перехват вызова Share-меню: показываем НАТИВНЫЙ шаринг + кнопку тайм-кода ─
 %hook YTShareEntityEndpointCommandHandler
 
 - (void)executeWithCommand:(id)command entry:(id)entry fromView:(UIView *)fromView sender:(id)sender {
-    // Если плеер активен и у нас есть ссылка с тайм-кодом — показываем нативное
-    // меню, инжектируя кастомное действие с тайм-кодом.
-    NSString *tsURL = currentTimestampedURL();
-
-    // Извлекаем «чистую» ссылку видео из сериализованного share-entity,
-    // чтобы получить и обычный URL (без si-идентификатора).
-    NSString *baseURL = nil;
-    NSRegularExpression *re =
-        [NSRegularExpression regularExpressionWithPattern:@"serialized_share_entity: \"([^\"]+)\""
-                                                  options:0 error:nil];
     NSString *desc = [command description];
-    NSTextCheckingResult *m = [re firstMatchInString:desc options:0 range:NSMakeRange(0, desc.length)];
-    if (m) {
-        NSString *serialized = [desc substringWithRange:[m rangeAtIndex:1]];
-        NSData *data = [[NSData alloc] initWithBase64EncodedString:serialized options:0];
-        if (!data) data = [serialized dataUsingEncoding:NSUTF8StringEncoding];
-        // Простейший парсинг: ищем watch?v=ID внутри протобуф-строки.
-        NSString *asString = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-        NSRegularExpression *reId =
-            [NSRegularExpression regularExpressionWithPattern:@"[A-Za-z0-9_-]{11}"
-                                                      options:0 error:nil];
-        NSTextCheckingResult *idMatch = [reId firstMatchInString:asString ?: @"" options:0
-                                                          range:NSMakeRange(0, (asString ?: @"").length)];
-        if (idMatch) {
-            NSString *vid = [asString substringWithRange:idMatch.range];
-            baseURL = [NSString stringWithFormat:@"https://www.youtube.com/watch?v=%@", vid];
-        }
-    }
 
-    if (!tsURL && !baseURL)
+    // 1. Базовая ссылка — из share-entity (без si-идентификатора отслеживания).
+    NSString *baseURL = extractUrlFromDescription(desc);
+
+    // 2. Фоллбэк: если entity не распарсился, а плеер активен — берём ID оттуда.
+    NSString *tsURL = currentTimestampedURL();
+    if (!baseURL && gLastPlayerOverlay.videoID)
+        baseURL = [NSString stringWithFormat:@"https://www.youtube.com/watch?v=%@",
+                                             gLastPlayerOverlay.videoID];
+
+    if (!baseURL)
         return %orig;   // не смогли разобрать — оставляем родное поведение YouTube
 
-    NSMutableArray *items = [NSMutableArray array];
-    if (baseURL) [items addObject:baseURL];
+    // 3. Если плеер активен — обычная ссылка тоже становится ссылкой с тайм-кодом.
+    if (!tsURL) tsURL = baseURL;
 
     YTCopyTimestampActivity *tsAct = [[YTCopyTimestampActivity alloc] init];
-    tsAct.timestampURL = tsURL ?: baseURL;
-    if (!tsAct.timestampURL)
-        return %orig;
+    tsAct.timestampURL = tsURL;
 
     UIActivityViewController *vc =
-        [[UIActivityViewController alloc] initWithActivityItems:items
+        [[UIActivityViewController alloc] initWithActivityItems:@[baseURL]
                                          applicationActivities:@[tsAct]];
     vc.excludedActivityTypes = @[UIActivityTypeAssignToContact, UIActivityTypePrint];
 
     UIViewController *top = [%c(YTUIUtils) topViewControllerForPresenting];
+    if (!top) return %orig;
+
     if (vc.popoverPresentationController) {
         if (fromView) {
             vc.popoverPresentationController.sourceView = fromView;
