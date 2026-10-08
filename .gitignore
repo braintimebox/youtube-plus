@@ -1,0 +1,7 @@
+packages/
+.theos/
+build/
+dist/
+*.deb
+*.dylib
+obj/

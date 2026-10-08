@@ -1,9 +1,13 @@
-Package: com.yourname.ytnativesharehybrid
-Name: YTNativeShareHybrid
-Depends: mobilesubstrate, com.dayanch96.ytlite
+Package: com.braintimebox.youtubeplus
+Name: YouTube Plus
 Version: 1.0.0
-Architecture: iphone-arm
-Maintainer: Oleksandr
-Author: Oleksandr
+Architecture: iphoneos-arm
+Description: Hybrid native iOS Share Sheet for YouTube with timecode copy support.
+ Replaces YouTube's custom share menu with the native iOS UIActivityViewController
+ (system icons: AirDrop, Messages, Copy...) and adds a "Copy link with timecode"
+ action bound to the current playback position (&t=Ns).
+Maintainer: braintimebox
+Author: braintimebox
+Homepage: https://github.com/braintimebox/youtube-plus
 Section: Tweaks
-Description: Hybrid native iOS Share Sheet with timestamp extraction for YouTube Plus
+Depends: mobilesubstrate (>= 0.9.5000)

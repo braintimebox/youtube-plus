@@ -1,25 +1,54 @@
-name: Build YouTube Native Share Hybrid Tweak
+name: Build YouTube Plus Tweak
 
 on:
   push:
-    branches: [ master, main ]
+    branches: [ main ]
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: macos-latest
+    env:
+      THEOS: ${{ github.workspace }}/theos
     steps:
       - uses: actions/checkout@v4
-      
-      - name: Set up Theos environment (stub)
+
+      - name: Install Theos + iOS toolchain
         run: |
-          echo "Setting up build environment for YTNativeShareHybrid..."
-          mkdir -p packages
-          # Создаем демонстрационный симулятор артефакта tbd/dylib/deb для демонстрации сборки
-          echo "YTNativeShareHybrid Tweak Build Artifact" > packages/com.yourname.ytnativesharehybrid_1.0.0_iphone-arm.deb
-      
-      - name: Upload Artifacts
+          set -e
+          git clone --recursive --depth 1 https://github.com/theos/theos "$THEOS"
+          brew install ldid dpkg xz
+          echo "$THEOS/bin" >> "$GITHUB_PATH"
+          echo "THEOS=$THEOS" >> "$GITHUB_ENV"
+
+      - name: Install iOS SDK
+        run: |
+          set -e
+          mkdir -p "$THEOS/sdks"
+          curl -L -o /tmp/sdk.tar.xz \
+            https://github.com/theos/sdks/raw/master/iPhoneOS16.5.sdk.tar.xz
+          tar -xJf /tmp/sdk.tar.xz -C "$THEOS/sdks"
+
+      - name: Build tweak (real Theos build)
+        run: |
+          set -e
+          make clean || true
+          make package FINALPACKAGE=1
+          ls -la packages/
+
+      - name: Extract dylib from .deb
+        run: |
+          set -e
+          mkdir -p dist
+          cp packages/*.deb dist/
+          DEB=$(ls packages/*.deb | head -1)
+          dpkg-deb -x "$DEB" /tmp/debroot
+          find /tmp/debroot -name "*.dylib" -exec cp {} dist/YouTubePlus.dylib \;
+          ls -la dist/
+
+      - name: Upload build artifact (.deb + .dylib)
         uses: actions/upload-artifact@v4
         with:
-          name: YTNativeShareHybrid-Package
-          path: packages/*.deb
+          name: YouTubePlus-tweak
+          path: dist/*
+          if-no-files-found: error
