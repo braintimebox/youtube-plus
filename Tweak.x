@@ -76,8 +76,6 @@ static __weak YTMainAppVideoPlayerOverlayViewController *gLastPlayerOverlay = ni
 
 // ── Хелперы ──────────────────────────────────────────────────────────────────
 
-static NSString *const kTimecodeActivityTitle = @"Копировать ссылку с тайм-кодом";
-
 // Формирует ссылку с текущим тайм-кодом, если плеер активен.
 static NSString *currentTimestampedURL(void) {
     YTMainAppVideoPlayerOverlayViewController *overlay = gLastPlayerOverlay;
@@ -88,40 +86,6 @@ static NSString *currentTimestampedURL(void) {
     return [NSString stringWithFormat:@"https://www.youtube.com/watch?v=%@&t=%lds",
                                       overlay.videoID, (long)t];
 }
-
-static void copyToPasteboard(NSString *string) {
-    if (string.length == 0) return;
-    [UIPasteboard generalPasteboard].string = string;
-    if (@available(iOS 13.0, *)) {
-        UINotificationFeedbackGenerator *gen = [[UINotificationFeedbackGenerator alloc] init];
-        [gen notificationOccurred:UINotificationFeedbackTypeSuccess];
-    }
-}
-
-// ── Кастомное действие «Копировать с тайм-кодом» для UIActivityViewController ─
-@interface YTCopyTimestampActivity : UIActivity
-@property (nonatomic, copy) NSString *timestampURL;
-@end
-
-@implementation YTCopyTimestampActivity
-
-- (NSString *)activityType  { return @"com.braintimebox.youtubeplus.copyTimestamp"; }
-- (NSString *)activityTitle { return kTimecodeActivityTitle; }
-
-- (UIImage *)activityImage {
-    if (@available(iOS 13.0, *))
-        return [UIImage systemImageNamed:@"clock.arrow.circlepath"];
-    return nil;
-}
-
-- (BOOL)canPerformWithActivityItems:(NSArray *)activityItems { return YES; }
-
-- (void)performActivity {
-    copyToPasteboard(self.timestampURL);
-    [self activityDidFinish:YES];
-}
-
-@end
 
 // ── Запоминаем активный плеер (отсюда берём mediaTime + videoID) ──────────────
 %hook YTMainAppVideoPlayerOverlayViewController
@@ -204,12 +168,16 @@ static NSString *extractUrlFromDescription(NSString *desc) {
     // 3. Если плеер активен — обычная ссылка тоже становится ссылкой с тайм-кодом.
     if (!tsURL) tsURL = baseURL;
 
-    YTCopyTimestampActivity *tsAct = [[YTCopyTimestampActivity alloc] init];
-    tsAct.timestampURL = tsURL;
+    // 4. Передаём NSURL, а не текст:
+    //    - iOS сама подтянет метаданные страницы и нарисует верхнюю строку
+    //      с обложкой и названием (как в оригинальном меню YouTube);
+    //    - «Копировать» копирует ровно эту ссылку — уже с тайм-кодом, без
+    //      отдельной иконки и без лишних шагов.
+    NSURL *shareURL = [NSURL URLWithString:tsURL];
 
     UIActivityViewController *vc =
-        [[UIActivityViewController alloc] initWithActivityItems:@[baseURL]
-                                         applicationActivities:@[tsAct]];
+        [[UIActivityViewController alloc] initWithActivityItems:@[shareURL ?: tsURL]
+                                         applicationActivities:nil];
     vc.excludedActivityTypes = @[UIActivityTypeAssignToContact, UIActivityTypePrint];
 
     UIViewController *top = [%c(YTUIUtils) topViewControllerForPresenting];
