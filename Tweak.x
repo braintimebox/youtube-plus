@@ -25,6 +25,40 @@
 @property (readonly, nonatomic) NSString *videoID;
 @end
 
+// ── Фикс входа в Google: возвращаем реальную keychain access group из entitlements ──
+// Без этого YouTube (особенно после ресайна Feather'ом) не может найти ключи
+// сессии и падает в ошибку авторизации. Реализация — как в YTLitePlus/uYouPlus.
+#import <Security/Security.h>
+
+static NSString *accessGroupID(void) {
+    NSDictionary *query = @{
+        (__bridge NSString *)kSecClass       : (__bridge NSString *)kSecClassGenericPassword,
+        (__bridge NSString *)kSecAttrAccount : @"bundleSeedID",
+        (__bridge NSString *)kSecAttrService : @"",
+        (__bridge NSString *)kSecReturnAttributes : @YES,
+    };
+    CFDictionaryRef result = NULL;
+    OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, (CFTypeRef *)&result);
+    if (status == errSecItemNotFound)
+        status = SecItemAdd((__bridge CFDictionaryRef)query, (CFTypeRef *)&result);
+    if (status != errSecSuccess || !result)
+        return nil;
+    NSString *accessGroup = [(__bridge NSDictionary *)result
+        objectForKey:(__bridge NSString *)kSecAttrAccessGroup];
+    CFRelease(result);
+    return accessGroup;
+}
+
+%hook SSOKeychainHelper
++ (NSString *)accessGroup      { return accessGroupID() ?: %orig; }
++ (NSString *)sharedAccessGroup{ return accessGroupID() ?: %orig; }
+%end
+
+%hook SSOKeychainCore
++ (NSString *)accessGroup      { return accessGroupID() ?: %orig; }
++ (NSString *)sharedAccessGroup{ return accessGroupID() ?: %orig; }
+%end
+
 // ── Состояние: последний открытый плеер, чтобы взять из него тайм-код ─────────
 static __weak YTMainAppVideoPlayerOverlayViewController *gLastPlayerOverlay = nil;
 

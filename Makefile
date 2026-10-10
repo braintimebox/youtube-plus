@@ -21,8 +21,9 @@ PACKAGE_VERSION = 1.0.0
 INSTALL_TARGET_PROCESSES = YouTube
 
 TWEAK_NAME = YouTubePlus
-YouTubePlus_FILES   = Tweak.x
-YouTubePlus_CFLAGS  = -fobjc-arc
+YouTubePlus_FILES    = Tweak.x
+YouTubePlus_FRAMEWORKS = UIKit Security
+YouTubePlus_CFLAGS   = -fobjc-arc
 # theos-jailed берёт базовое приложение отсюда (каталог .app, см. module/bin/stage.sh)
 YouTubePlus_IPA     = $(THEOS_PROJECT_DIR)/tmp/Payload/YouTube.app
 
