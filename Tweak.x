@@ -13,6 +13,8 @@
  */
 
 #include <UIKit/UIKit.h>
+#import <LinkPresentation/LinkPresentation.h>
+#import <objc/runtime.h>
 
 // ── Реальные классы YouTube (из YTLite.h / youtube-native-share) ──────────────
 
@@ -85,6 +87,157 @@ static NSString *currentTimestampedURL(void) {
     NSInteger t = (NSInteger)overlay.mediaTime;
     return [NSString stringWithFormat:@"https://www.youtube.com/watch?v=%@&t=%lds",
                                       overlay.videoID, (long)t];
+}
+
+// Текущая позиция в формате mm:ss (или h:mm:ss).
+static NSString *currentTimestampLabel(void) {
+    YTMainAppVideoPlayerOverlayViewController *overlay = gLastPlayerOverlay;
+    if (!overlay) return nil;
+    NSInteger s = (NSInteger)overlay.mediaTime;
+    if (s < 0) return nil;
+    if (s >= 3600)
+        return [NSString stringWithFormat:@"%ld:%02ld:%02ld", (long)(s/3600), (long)((s%3600)/60), (long)(s%60)];
+    return [NSString stringWithFormat:@"%ld:%02ld", (long)(s/60), (long)(s%60)];
+}
+
+// Ключ ассоциированного объекта: хранит ссылку для полосы тайм-кодов.
+static const char kYTTimecodeURLKey;
+
+// ── Источник данных для системного share sheet ────────────────────────────────
+// Именно он заставляет iOS нарисовать нормальную верхнюю строку превью:
+// без него iOS показывает просто текст ссылки без обложки и названия.
+@interface YTShareItemSource : NSObject <UIActivityItemSource>
+@property (nonatomic, copy) NSString *url;
+@property (nonatomic, copy) NSString *title;
+@end
+
+@implementation YTShareItemSource
+
+- (id)activityViewControllerPlaceholderItem:(UIActivityViewController *)avc {
+    return self.url;
+}
+
+- (id)activityViewController:(UIActivityViewController *)avc
+         itemForActivityType:(NSString *)activityType {
+    return self.url;
+}
+
+- (NSString *)activityViewController:(UIActivityViewController *)avc
+              subjectForActivityType:(NSString *)activityType {
+    return self.title;
+}
+
+- (LPLinkMetadata *)activityViewController:(UIActivityViewController *)avc
+                   linkMetadataForActivityType:(NSString *)activityType {
+    LPLinkMetadata *meta = [[LPLinkMetadata alloc] init];
+    NSURL *u = [NSURL URLWithString:self.url];
+    meta.originalURL = u;
+    meta.URL = u;
+    meta.title = self.title;
+    return meta;
+}
+
+@end
+
+// ── Полоса тайм-кодов внутри share sheet (tableHeaderView) ────────────────────
+@interface YTTimecodeStripView : UIView
+@end
+
+@implementation YTTimecodeStripView
+
+- (instancetype)initWithFrame:(CGRect)frame url:(NSString *)url label:(NSString *)label {
+    self = [super initWithFrame:frame];
+    if (!self) return nil;
+
+    self.backgroundColor = [UIColor clearColor];
+    self.frame = CGRectMake(0, 0, frame.size.width, 56);
+
+    UILabel *caption = [[UILabel alloc] init];
+    caption.translatesAutoresizingMaskIntoConstraints = NO;
+    caption.text = @"Тайм-код";
+    caption.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
+    caption.textColor = [UIColor secondaryLabelColor];
+
+    UILabel *value = [[UILabel alloc] init];
+    value.translatesAutoresizingMaskIntoConstraints = NO;
+    value.text = label ?: @"—";
+    value.font = [UIFont monospacedDigitSystemFontOfSize:17 weight:UIFontWeightSemibold];
+    value.textAlignment = NSTextAlignmentRight;
+
+    UIImageView *chevron = [[UIImageView alloc] init];
+    chevron.translatesAutoresizingMaskIntoConstraints = NO;
+    chevron.contentMode = UIViewContentModeScaleAspectFit;
+    if (@available(iOS 13.0, *)) {
+        chevron.image = [UIImage systemImageNamed:@"doc.on.doc"];
+        chevron.tintColor = [UIColor secondaryLabelColor];
+    }
+    chevron.frame = CGRectMake(0, 0, 18, 18);
+
+    UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[caption, value, chevron]];
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    stack.axis = UILayoutConstraintAxisHorizontal;
+    stack.spacing = 8;
+    stack.alignment = UIStackViewAlignmentCenter;
+    [stack setCustomSpacing:12 afterView:caption];
+
+    [self addSubview:stack];
+    [NSLayoutConstraint activateConstraints:@[
+        [stack.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:16],
+        [stack.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-16],
+        [stack.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
+        [value.widthAnchor constraintGreaterThanOrEqualToConstant:70],
+    ]];
+
+    // Тап по полосе — копируем ссылку с тайм-кодом.
+    UITapGestureRecognizer *tap =
+        [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(yt_copy:)];
+    [self addGestureRecognizer:tap];
+    self.userInteractionEnabled = YES;
+    objc_setAssociatedObject(tap, &kYTTimecodeURLKey, url, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return self;
+}
+
+- (void)yt_copy:(UITapGestureRecognizer *)sender {
+    NSString *url = objc_getAssociatedObject(sender, &kYTTimecodeURLKey);
+    if (url.length == 0) return;
+    [UIPasteboard generalPasteboard].string = url;
+    if (@available(iOS 10.0, *)) {
+        [[[UINotificationFeedbackGenerator alloc] init]
+            notificationOccurred:UINotificationFeedbackTypeSuccess];
+    }
+}
+
+@end
+
+// Вставляет полосу внутрь системного share sheet.
+static void attachTimecodeStrip(UIActivityViewController *vc, NSString *url, NSString *label) {
+    if (url.length == 0) return;
+
+    __weak UIActivityViewController *weakVC = vc;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIActivityViewController *strongVC = weakVC;
+        if (!strongVC) return;
+
+        __block UITableView *table = nil;
+        void (^find)(UIView *) = nil;
+        find = ^(UIView *view) {
+            if (table) return;
+            if ([view isKindOfClass:[UITableView class]]) {
+                table = (UITableView *)view;
+                return;
+            }
+            for (UIView *sub in view.subviews) find(sub);
+        };
+        find(strongVC.view);
+
+        if (!table) return;   // раскладка не найдена — просто без полосы
+
+        CGRect r = table.bounds;
+        YTTimecodeStripView *strip =
+            [[YTTimecodeStripView alloc] initWithFrame:CGRectMake(0, 0, r.size.width, 56)
+                                                    url:url label:label];
+        table.tableHeaderView = strip;
+    });
 }
 
 // ── Запоминаем активный плеер (отсюда берём mediaTime + videoID) ──────────────
@@ -168,17 +321,20 @@ static NSString *extractUrlFromDescription(NSString *desc) {
     // 3. Если плеер активен — обычная ссылка тоже становится ссылкой с тайм-кодом.
     if (!tsURL) tsURL = baseURL;
 
-    // 4. Передаём NSURL, а не текст:
-    //    - iOS сама подтянет метаданные страницы и нарисует верхнюю строку
-    //      с обложкой и названием (как в оригинальном меню YouTube);
-    //    - «Копировать» копирует ровно эту ссылку — уже с тайм-кодом, без
-    //      отдельной иконки и без лишних шагов.
-    NSURL *shareURL = [NSURL URLWithString:tsURL];
+    // 4. Источник данных: без него iOS рисует голый текст ссылки. С ним —
+    //    нормальная верхняя строка превью (обложка + название).
+    YTShareItemSource *item = [[YTShareItemSource alloc] init];
+    item.url = tsURL;
+    item.title = gLastPlayerOverlay.videoID ?: @"YouTube";
 
     UIActivityViewController *vc =
-        [[UIActivityViewController alloc] initWithActivityItems:@[shareURL ?: tsURL]
+        [[UIActivityViewController alloc] initWithActivityItems:@[item]
                                          applicationActivities:nil];
     vc.excludedActivityTypes = @[UIActivityTypeAssignToContact, UIActivityTypePrint];
+
+    // 5. Полоса с текущим тайм-кодом — встраивается в сам share sheet.
+    //    Тап по ней копирует ссылку с тайм-кодом.
+    attachTimecodeStrip(vc, tsURL, currentTimestampLabel());
 
     UIViewController *top = [%c(YTUIUtils) topViewControllerForPresenting];
     if (!top) return %orig;
