@@ -141,6 +141,7 @@ static const char kYTTimecodeURLKey;
 
 // ── Полоса тайм-кодов внутри share sheet (tableHeaderView) ────────────────────
 @interface YTTimecodeStripView : UIView
+- (instancetype)initWithFrame:(CGRect)frame url:(NSString *)url label:(NSString *)label;
 @end
 
 @implementation YTTimecodeStripView
@@ -209,6 +210,19 @@ static const char kYTTimecodeURLKey;
 
 @end
 
+// Ищет UITableView внутри view. Рекурсивная C-функция: блок здесь нельзя
+// использовать — блок захватил бы собственное значение (nil) и упал бы
+// при вызове (EXC_BAD_ACCESS).
+static UITableView *findTableViewInView(UIView *view) {
+    if ([view isKindOfClass:[UITableView class]])
+        return (UITableView *)view;
+    for (UIView *sub in view.subviews) {
+        UITableView *found = findTableViewInView(sub);
+        if (found) return found;
+    }
+    return nil;
+}
+
 // Вставляет полосу внутрь системного share sheet.
 static void attachTimecodeStrip(UIActivityViewController *vc, NSString *url, NSString *label) {
     if (url.length == 0) return;
@@ -218,23 +232,16 @@ static void attachTimecodeStrip(UIActivityViewController *vc, NSString *url, NSS
         UIActivityViewController *strongVC = weakVC;
         if (!strongVC) return;
 
-        __block UITableView *table = nil;
-        void (^find)(UIView *) = nil;
-        find = ^(UIView *view) {
-            if (table) return;
-            if ([view isKindOfClass:[UITableView class]]) {
-                table = (UITableView *)view;
-                return;
-            }
-            for (UIView *sub in view.subviews) find(sub);
-        };
-        find(strongVC.view);
+        [strongVC.view layoutIfNeeded];
 
-        if (!table) return;   // раскладка не найдена — просто без полосы
+        UITableView *table = findTableViewInView(strongVC.view);
+        if (!table) return;   // раскладка не найдена — просто без полосы, без падения
 
-        CGRect r = table.bounds;
+        CGFloat w = table.bounds.size.width;
+        if (w <= 0) w = UIScreen.mainScreen.bounds.size.width;
+
         YTTimecodeStripView *strip =
-            [[YTTimecodeStripView alloc] initWithFrame:CGRectMake(0, 0, r.size.width, 56)
+            [[YTTimecodeStripView alloc] initWithFrame:CGRectMake(0, 0, w, 56)
                                                     url:url label:label];
         table.tableHeaderView = strip;
     });
