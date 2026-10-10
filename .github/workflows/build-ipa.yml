@@ -1,0 +1,181 @@
+# Сборка YouTube Plus .ipa (theos-jailed).
+#
+# Запуск: Actions -> Build YouTube Plus IPA -> Run workflow -> указать URL на decrypted YouTube.ipa.
+# База намеренно НЕ поставляется репозиторием (Google не разрешает её распространение).
+# На выходе: не подписанный .ipa, который подставляется в Feather для ресайна.
+
+name: Build YouTube Plus IPA
+
+on:
+  workflow_dispatch:
+    inputs:
+      decrypted_youtube_url:
+        description: "Direct URL of the decrypted YouTube ipa"
+        required: true
+        default: "https://files.catbox.moe/5a8qlt.ipa"
+        type: string
+      bundle_id:
+        description: "Bundle ID of the resulting app"
+        required: true
+        default: "YouTubePlus"
+        type: string
+      app_name:
+        description: "Display name of the resulting app"
+        required: true
+        default: "YouTube"
+        type: string
+      sdk_version:
+        description: "iOS SDK version"
+        required: true
+        default: "16.5"
+        type: string
+      create_release:
+        description: "Create a draft release with the .ipa"
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build YouTube Plus IPA
+    # Intel-раннер обязателен: insert_dylib из theos-jailed собран только под x86_64.
+    runs-on: macos-15-intel
+    permissions:
+      contents: write
+    env:
+      THEOS: ${{ github.workspace }}/theos
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: brew install ldid dpkg make jq wget
+
+      - name: Install Theos
+        uses: actions/checkout@v4
+        with:
+          repository: theos/theos
+          path: theos
+          submodules: recursive
+
+      - name: Install iOS SDK
+        run: |
+          set -e
+          mkdir -p "$THEOS/sdks"
+          git clone --depth 1 https://github.com/theos/sdks.git /tmp/theos-sdks
+          cp -R "/tmp/theos-sdks/iPhoneOS${{ inputs.sdk_version }}.sdk" "$THEOS/sdks/"
+          test -f "$THEOS/sdks/iPhoneOS${{ inputs.sdk_version }}.sdk/SDKSettings.plist"
+          echo "SDK installed:" && ls "$THEOS/sdks"
+
+      - name: Install Theos Jailed
+        uses: actions/checkout@v4
+        with:
+          repository: qnblackcat/theos-jailed
+          path: theos-jailed
+
+      - name: Run theos-jailed installer
+        run: ./theos-jailed/install
+
+      - name: Pin SDK in Makefile
+        run: |
+          set -e
+          sed -i '' "s/^export TARGET .*/export TARGET = iphone:clang:${{ inputs.sdk_version }}:14.0/" Makefile
+          sed -i '' "s|^export SDK_PATH .*|export SDK_PATH = \$(THEOS)/sdks/iPhoneOS${{ inputs.sdk_version }}.sdk/|" Makefile
+          grep -E '^export (TARGET|SDK_PATH)' Makefile
+
+      - name: Download base YouTube ipa
+        env:
+          URL_YT: ${{ inputs.decrypted_youtube_url }}
+        run: |
+          set -e
+          echo "::add-mask::$URL_YT"
+          wget "$URL_YT" --quiet --no-verbose -O YouTube.ipa
+          ls -la YouTube.ipa
+          unzip -q YouTube.ipa -d tmp
+          ls -la tmp/Payload
+
+      - name: Prepare YouTube.app
+        env:
+          BUNDLE_ID: ${{ inputs.bundle_id }}
+          APP_NAME: ${{ inputs.app_name }}
+        run: |
+          set -e
+          APP=tmp/Payload/YouTube.app
+          test -d "$APP" || { echo "::error::Payload/YouTube.app not found"; ls -R tmp | head -50; exit 1; }
+
+          # Версия базы — для имени артефакта и отчёта.
+          YT_VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Info.plist")
+          echo "YT_VERSION=$YT_VERSION" >> "$GITHUB_ENV"
+
+          # Подготовка под сайдлоад: убрать подпись, расширения и ограничение устройств.
+          rm -rf "$APP/_CodeSignature/CodeResources"
+          rm -rf "$APP/PlugIns"
+
+          python3 - <<'PY'
+          import plistlib, os
+          p = 'tmp/Payload/YouTube.app/Info.plist'
+          with open(p, 'rb') as f: pl = plistlib.load(f)
+          pl.pop('UISupportedDevices', None)
+          pl['CFBundleDisplayName'] = os.environ['APP_NAME']
+          with open(p, 'wb') as f: plistlib.dump(pl, f)
+          print('Info.plist prepared; CFBundleDisplayName =', pl['CFBundleDisplayName'])
+          PY
+
+          echo "Bundle ID will be set to: $BUNDLE_ID"
+          echo "Display name will be set to: $APP_NAME"
+
+      - name: Build .ipa
+        run: |
+          set -e
+          make package \
+            BUNDLE_ID="${{ inputs.bundle_id }}" \
+            DISPLAY_NAME="${{ inputs.app_name }}" \
+            FINALPACKAGE=1 CODESIGN_IPA=0
+          ls -la packages/
+          IPA_FILE=$(ls -t packages/*.ipa | head -1)
+          OUT="YouTubePlus_${YT_VERSION:-1.0.0}_${{ inputs.bundle_id }}.ipa"
+          mv "$IPA_FILE" "packages/$OUT"
+          echo "ipa=packages/$OUT" >> "$GITHUB_OUTPUT"
+          echo "==> sha256: $(shasum -a 256 "packages/$OUT" | cut -f1 -d' ')"
+
+      - name: Verify injected ipa
+        run: |
+          set -e
+          IPA="packages/YouTubePlus_${YT_VERSION:-1.0.0}_${{ inputs.bundle_id }}.ipa"
+          mkdir -p verify && unzip -q "$IPA" -d verify
+          APP=$(find verify/Payload -maxdepth 1 -name '*.app' | head -1)
+          echo "APP: $APP"
+          echo "--- Info.plist ---"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP/Info.plist"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleDisplayName" "$APP/Info.plist"
+          echo "--- YouTubePlus.dylib present? ---"
+          find "$APP" -name 'YouTubePlus.dylib' -exec ls -la {} \;
+          echo "--- load command injected? ---"
+          otool -L "$APP/$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Info.plist")" | grep -i YouTubePlus
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: YouTubePlus-ipa
+          path: packages/*.ipa
+          if-no-files-found: error
+
+      - name: Create draft release
+        if: ${{ inputs.create_release }}
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: yt-${{ env.YT_VERSION }}-1.0.0
+          name: YouTube Plus ${{ env.YT_VERSION }} (bundle ${{ inputs.bundle_id }})
+          files: packages/*.ipa
+          draft: true
+          body: |
+            YouTube Plus — гибридное меню «Поделиться» (нативный iOS Share Sheet) + копирование тайм-кодов.
+            База: YouTube ${{ env.YT_VERSION }}. Bundle ID: `${{ inputs.bundle_id }}`.
+            Подпись: нет — ставится через Feather.
