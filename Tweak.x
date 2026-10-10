@@ -50,13 +50,25 @@ static NSString *accessGroupID(void) {
 }
 
 %hook SSOKeychainHelper
-+ (NSString *)accessGroup      { return accessGroupID() ?: %orig; }
-+ (NSString *)sharedAccessGroup{ return accessGroupID() ?: %orig; }
++ (NSString *)accessGroup {
+    NSString *group = accessGroupID();
+    return group ? group : %orig;
+}
++ (NSString *)sharedAccessGroup {
+    NSString *group = accessGroupID();
+    return group ? group : %orig;
+}
 %end
 
 %hook SSOKeychainCore
-+ (NSString *)accessGroup      { return accessGroupID() ?: %orig; }
-+ (NSString *)sharedAccessGroup{ return accessGroupID() ?: %orig; }
++ (NSString *)accessGroup {
+    NSString *group = accessGroupID();
+    return group ? group : %orig;
+}
++ (NSString *)sharedAccessGroup {
+    NSString *group = accessGroupID();
+    return group ? group : %orig;
+}
 %end
 
 // ── Состояние: последний открытый плеер, чтобы взять из него тайм-код ─────────
