@@ -28,12 +28,17 @@ jobs:
           echo "$THEOS/bin" >> "$GITHUB_PATH"
           echo "THEOS=$THEOS" >> "$GITHUB_ENV"
 
+      # ldid/dpkg/xz — инструменты РАННЕРА, а не часть кэшируемого дерева Theos.
+      # Ставятся безусловно: при попадании в кэш шаг Install Theos пропускается,
+      # и ldid иначе отсутствует -> падение подписи (Error 127) на сборке.
+      - name: Install runner tools (ldid, dpkg, xz)
+        run: brew install ldid dpkg xz
+
       - name: Install Theos + iOS toolchain
         if: steps.cache-theos.outputs.cache-hit != 'true'
         run: |
           set -e
           git clone --recursive --depth 1 https://github.com/theos/theos "$THEOS"
-          brew install ldid dpkg xz
 
       - name: Install iOS SDK
         if: steps.cache-theos.outputs.cache-hit != 'true'
