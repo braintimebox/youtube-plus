@@ -72,7 +72,12 @@ jobs:
         run: |
           set -e
           mkdir -p "$THEOS/sdks"
-          git clone --depth 1 https://github.com/theos/sdks.git /tmp/theos-sdks
+          # MEASURED: полное клонирование репо theos/sdks (14 SDK) = 95s из 291s
+          # всего билда. Sparse-checkout берёт только нужную папку.
+          git clone --depth 1 --filter=blob:none --no-checkout \
+            https://github.com/theos/sdks.git /tmp/theos-sdks
+          git -C /tmp/theos-sdks sparse-checkout set "iPhoneOS${{ inputs.sdk_version }}.sdk"
+          git -C /tmp/theos-sdks checkout
           cp -R "/tmp/theos-sdks/iPhoneOS${{ inputs.sdk_version }}.sdk" "$THEOS/sdks/"
           test -f "$THEOS/sdks/iPhoneOS${{ inputs.sdk_version }}.sdk/SDKSettings.plist"
           echo "SDK installed:" && ls "$THEOS/sdks"
