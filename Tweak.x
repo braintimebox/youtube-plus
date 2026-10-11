@@ -211,21 +211,6 @@ static const char kYTTimecodeLabelKey;
 
 @end
 
-// Ищет таблицу/скролл внутри view. Рекурсивная C-функция: блок здесь нельзя
-// использовать — блок захватил бы собственное значение (nil) и упал бы
-// при вызове (EXC_BAD_ACCESS).
-static UIView *findScrollViewInView(UIView *view) {
-    if ([view isKindOfClass:[UITableView class]])
-        return view;
-    if ([view isKindOfClass:[UICollectionView class]])
-        return view;
-    for (UIView *sub in view.subviews) {
-        UIView *found = findScrollViewInView(sub);
-        if (found) return found;
-    }
-    return nil;
-}
-
 // Помечает, что полоса уже вставлена, чтобы не дублировать при каждой раскладке.
 static const char kYTStripAttachedKey;
 
@@ -247,14 +232,12 @@ static void attachTimecodeStrip(UIActivityViewController *vc, NSString *url, NSS
     strip.translatesAutoresizingMaskIntoConstraints = NO;
     [vc.view addSubview:strip];
 
-    UILayoutGuide *safe = vc.view.safeAreaLayoutGuide;
     [NSLayoutConstraint activateConstraints:@[
         [strip.topAnchor constraintEqualToAnchor:vc.view.topAnchor],
         [strip.leadingAnchor constraintEqualToAnchor:vc.view.leadingAnchor],
         [strip.trailingAnchor constraintEqualToAnchor:vc.view.trailingAnchor],
         [strip.heightAnchor constraintEqualToConstant:56],
     ]];
-    (void)safe;
 
     objc_setAssociatedObject(vc, &kYTStripAttachedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
