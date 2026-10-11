@@ -29,6 +29,11 @@ on:
         required: true
         default: "16.5"
         type: string
+      strip_injected:
+        description: "Strip foreign tweaks from base (use a MODDED ipa as clean base)"
+        required: false
+        default: false
+        type: boolean
       create_release:
         description: "Create a draft release with the .ipa"
         required: false

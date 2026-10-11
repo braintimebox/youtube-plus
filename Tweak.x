@@ -229,33 +229,33 @@ static UIView *findScrollViewInView(UIView *view) {
 // Помечает, что полоса уже вставлена, чтобы не дублировать при каждой раскладке.
 static const char kYTStripAttachedKey;
 
-// Ставит полосу тайм-кодов внутрь share sheet. Вызывается из viewDidLayoutSubviews —
-// к этому моменту view гарантированно построена.
+// Ставит полосу тайм-кодов внутрь share sheet. Не ищем таблицу — раньше это
+// не сработало (структура меню на iOS 27 неизвестна). Вешаем полосу прямо на
+// view контроллера, закрепив сверху: так она видна всегда.
 static void attachTimecodeStrip(UIActivityViewController *vc, NSString *url, NSString *label) {
     if (url.length == 0) return;
     if (objc_getAssociatedObject(vc, &kYTStripAttachedKey)) return;
     if (!vc.isViewLoaded) return;
+    if (vc.view.window == nil) return;   // ещё не показан — попробуем при следующей раскладке
 
-    [vc.view layoutIfNeeded];
-
-    UIView *scroll = findScrollViewInView(vc.view);
-    if (!scroll) return;   // структура не найдена — без полосы, но без падения
-
-    CGFloat w = scroll.bounds.size.width;
+    CGFloat w = vc.view.bounds.size.width;
     if (w <= 0) w = UIScreen.mainScreen.bounds.size.width;
 
     YTTimecodeStripView *strip =
         [[YTTimecodeStripView alloc] initWithFrame:CGRectMake(0, 0, w, 56)
                                                 url:url label:label];
+    strip.translatesAutoresizingMaskIntoConstraints = NO;
+    [vc.view addSubview:strip];
 
-    if ([scroll isKindOfClass:[UITableView class]]) {
-        ((UITableView *)scroll).tableHeaderView = strip;
-    } else {
-        // Коллекция/скролл — вставляем как обычную подвидимость сверху контента.
-        strip.frame = CGRectMake(0, 0, w, 56);
-        strip.autoresizingMask = UIViewAutoresizingFlexibleWidth;
-        [scroll addSubview:strip];
-    }
+    UILayoutGuide *safe = vc.view.safeAreaLayoutGuide;
+    [NSLayoutConstraint activateConstraints:@[
+        [strip.topAnchor constraintEqualToAnchor:vc.view.topAnchor],
+        [strip.leadingAnchor constraintEqualToAnchor:vc.view.leadingAnchor],
+        [strip.trailingAnchor constraintEqualToAnchor:vc.view.trailingAnchor],
+        [strip.heightAnchor constraintEqualToConstant:56],
+    ]];
+    (void)safe;
+
     objc_setAssociatedObject(vc, &kYTStripAttachedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
