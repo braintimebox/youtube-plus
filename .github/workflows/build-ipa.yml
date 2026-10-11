@@ -61,7 +61,18 @@ jobs:
       - name: Install dependencies
         run: brew install ldid dpkg make jq wget
 
+      # Единый стандарт кэша: тулчейн (theos + iOS SDK) восстанавливается целиком,
+      # установка пропускается при попадании. Экономия — шаги Install Theos (10s)
+      # и Install iOS SDK (28s) из 154s всего билда.
+      - name: Cache Theos + iOS SDK
+        id: cache-theos
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/theos
+          key: theos-${{ runner.os }}-sdk${{ inputs.sdk_version }}-v1
+
       - name: Install Theos
+        if: steps.cache-theos.outputs.cache-hit != 'true'
         uses: actions/checkout@v4
         with:
           repository: theos/theos
@@ -69,6 +80,7 @@ jobs:
           submodules: recursive
 
       - name: Install iOS SDK
+        if: steps.cache-theos.outputs.cache-hit != 'true'
         run: |
           set -e
           mkdir -p "$THEOS/sdks"

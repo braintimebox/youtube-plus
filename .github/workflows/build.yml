@@ -13,15 +13,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Единый стандарт кэша: тулчейн восстанавливается целиком, установка
+      # пропускается при попадании. Переменные окружения выставляются всегда —
+      # без них make не найдёт THEOS даже на попадании в кэш.
+      - name: Cache Theos + iOS SDK
+        id: cache-theos
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.THEOS }}
+          key: theos-${{ runner.os }}-sdk16.5-v1
+
+      - name: Set Theos env
+        run: |
+          echo "$THEOS/bin" >> "$GITHUB_PATH"
+          echo "THEOS=$THEOS" >> "$GITHUB_ENV"
+
       - name: Install Theos + iOS toolchain
+        if: steps.cache-theos.outputs.cache-hit != 'true'
         run: |
           set -e
           git clone --recursive --depth 1 https://github.com/theos/theos "$THEOS"
           brew install ldid dpkg xz
-          echo "$THEOS/bin" >> "$GITHUB_PATH"
-          echo "THEOS=$THEOS" >> "$GITHUB_ENV"
 
       - name: Install iOS SDK
+        if: steps.cache-theos.outputs.cache-hit != 'true'
         run: |
           set -e
           mkdir -p "$THEOS/sdks"
