@@ -100,8 +100,9 @@ static NSString *currentTimestampLabel(void) {
     return [NSString stringWithFormat:@"%ld:%02ld", (long)(s/60), (long)(s%60)];
 }
 
-// Ключ ассоциированного объекта: хранит ссылку для полосы тайм-кодов.
+// Ключи ассоциированных объектов: тайм-кодовая ссылка и её подпись.
 static const char kYTTimecodeURLKey;
+static const char kYTTimecodeLabelKey;
 
 // ── Источник данных для системного share sheet ────────────────────────────────
 // Именно он заставляет iOS нарисовать нормальную верхнюю строку превью:
@@ -210,41 +211,52 @@ static const char kYTTimecodeURLKey;
 
 @end
 
-// Ищет UITableView внутри view. Рекурсивная C-функция: блок здесь нельзя
+// Ищет таблицу/скролл внутри view. Рекурсивная C-функция: блок здесь нельзя
 // использовать — блок захватил бы собственное значение (nil) и упал бы
 // при вызове (EXC_BAD_ACCESS).
-static UITableView *findTableViewInView(UIView *view) {
+static UIView *findScrollViewInView(UIView *view) {
     if ([view isKindOfClass:[UITableView class]])
-        return (UITableView *)view;
+        return view;
+    if ([view isKindOfClass:[UICollectionView class]])
+        return view;
     for (UIView *sub in view.subviews) {
-        UITableView *found = findTableViewInView(sub);
+        UIView *found = findScrollViewInView(sub);
         if (found) return found;
     }
     return nil;
 }
 
-// Вставляет полосу внутрь системного share sheet.
+// Помечает, что полоса уже вставлена, чтобы не дублировать при каждой раскладке.
+static const char kYTStripAttachedKey;
+
+// Ставит полосу тайм-кодов внутрь share sheet. Вызывается из viewDidLayoutSubviews —
+// к этому моменту view гарантированно построена.
 static void attachTimecodeStrip(UIActivityViewController *vc, NSString *url, NSString *label) {
     if (url.length == 0) return;
+    if (objc_getAssociatedObject(vc, &kYTStripAttachedKey)) return;
+    if (!vc.isViewLoaded) return;
 
-    __weak UIActivityViewController *weakVC = vc;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        UIActivityViewController *strongVC = weakVC;
-        if (!strongVC) return;
+    [vc.view layoutIfNeeded];
 
-        [strongVC.view layoutIfNeeded];
+    UIView *scroll = findScrollViewInView(vc.view);
+    if (!scroll) return;   // структура не найдена — без полосы, но без падения
 
-        UITableView *table = findTableViewInView(strongVC.view);
-        if (!table) return;   // раскладка не найдена — просто без полосы, без падения
+    CGFloat w = scroll.bounds.size.width;
+    if (w <= 0) w = UIScreen.mainScreen.bounds.size.width;
 
-        CGFloat w = table.bounds.size.width;
-        if (w <= 0) w = UIScreen.mainScreen.bounds.size.width;
+    YTTimecodeStripView *strip =
+        [[YTTimecodeStripView alloc] initWithFrame:CGRectMake(0, 0, w, 56)
+                                                url:url label:label];
 
-        YTTimecodeStripView *strip =
-            [[YTTimecodeStripView alloc] initWithFrame:CGRectMake(0, 0, w, 56)
-                                                    url:url label:label];
-        table.tableHeaderView = strip;
-    });
+    if ([scroll isKindOfClass:[UITableView class]]) {
+        ((UITableView *)scroll).tableHeaderView = strip;
+    } else {
+        // Коллекция/скролл — вставляем как обычную подвидимость сверху контента.
+        strip.frame = CGRectMake(0, 0, w, 56);
+        strip.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+        [scroll addSubview:strip];
+    }
+    objc_setAssociatedObject(vc, &kYTStripAttachedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
 // ── Запоминаем активный плеер (отсюда берём mediaTime + videoID) ──────────────
@@ -253,6 +265,23 @@ static void attachTimecodeStrip(UIActivityViewController *vc, NSString *url, NSS
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
     gLastPlayerOverlay = self;
+}
+
+%end
+
+// ── Вставляем полосу тайм-кодов, когда структура share sheet построена ────────
+// Вызов идёт только если наши ассоциированные объекты есть — чужие share sheet
+// (из других приложений) не трогаем: проверка по ключу ничего не находит и
+// функция выходит сразу.
+%hook UIActivityViewController
+
+- (void)viewDidLayoutSubviews {
+    %orig;
+    NSString *url = objc_getAssociatedObject(self, &kYTTimecodeURLKey);
+    if (url.length == 0) return;
+
+    NSString *label = objc_getAssociatedObject(self, &kYTTimecodeLabelKey);
+    attachTimecodeStrip(self, url, label);
 }
 
 %end
@@ -340,8 +369,11 @@ static NSString *extractUrlFromDescription(NSString *desc) {
     vc.excludedActivityTypes = @[UIActivityTypeAssignToContact, UIActivityTypePrint];
 
     // 5. Полоса с текущим тайм-кодом — встраивается в сам share sheet.
-    //    Тап по ней копирует ссылку с тайм-кодом.
-    attachTimecodeStrip(vc, tsURL, currentTimestampLabel());
+    //    Данные кладём в ассоциированные объекты, а вставку делаем в
+    //    viewDidLayoutSubviews — там view гарантированно построена.
+    objc_setAssociatedObject(vc, &kYTTimecodeURLKey, tsURL, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(vc, &kYTTimecodeLabelKey,
+                             currentTimestampLabel(), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
     UIViewController *top = [%c(YTUIUtils) topViewControllerForPresenting];
     if (!top) return %orig;
