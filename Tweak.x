@@ -100,6 +100,47 @@ static NSString *currentTimestampLabel(void) {
     return [NSString stringWithFormat:@"%ld:%02ld", (long)(s/60), (long)(s%60)];
 }
 
+// Ограничивает высоту листа, чтобы шторка не растягивалась на весь экран.
+// Дефолтный UISheetPresentationController.detents = [.large()] (полная высота),
+// поэтому голый UIActivityViewController без детентов уходит в ~95%. Здесь:
+//   iOS 16+ -> custom detent ~62% (custom-детенты требуют 16.0+, не 15);
+//   iOS 15  -> системный .medium() (~половина экрана);
+//   iOS <15 -> остаётся pageSheet, но потолок heightAnchor удерживает высоту.
+// Полоса тайм-кодов закреплена сверху (attachTimecodeStrip), поэтому место
+// под неё появляется именно за счёт уменьшения листа.
+static void applySheetHeightCap(UIActivityViewController *vc) {
+    if (!vc) return;
+    vc.modalPresentationStyle = UIModalPresentationPageSheet;
+
+    if (@available(iOS 16.0, *)) {
+        UISheetPresentationController *pc = vc.sheetPresentationController;
+        if (pc) {
+            UISheetPresentationControllerDetent *hybrid =
+                [UISheetPresentationControllerDetent customDetentWithIdentifier:@"yt.hybrid"
+                                                                       resolver:^CGFloat (UISheetPresentationControllerContext *context) {
+                    return context.maximumDetentValue * 0.62;
+                }];
+            pc.detents = @[hybrid];
+            pc.prefersGrabberVisible = YES;
+            return;
+        }
+    } else if (@available(iOS 15.0, *)) {
+        UISheetPresentationController *pc = vc.sheetPresentationController;
+        if (pc) {
+            pc.detents = @[UISheetPresentationControllerDetent.mediumDetent];
+            pc.prefersGrabberVisible = YES;
+        }
+    }
+
+    // Фоллбэк для iOS <15 (и страховка): жёсткий потолок высоты view.
+    // Не даёт листу развернуться на полный экран даже без поддержки детентов.
+    [vc.view layoutIfNeeded];
+    CGFloat capH = MAX([UIScreen mainScreen].bounds.size.height * 0.62, 460.0);
+    NSLayoutConstraint *cap = [vc.view.heightAnchor constraintLessThanOrEqualToConstant:capH];
+    cap.priority = UILayoutPriorityRequired;
+    cap.active = YES;
+}
+
 // Ключи ассоциированных объектов: тайм-кодовая ссылка и её подпись.
 static const char kYTTimecodeURLKey;
 static const char kYTTimecodeLabelKey;
@@ -372,6 +413,10 @@ static NSString *extractUrlFromDescription(NSString *desc) {
             vc.popoverPresentationController.sourceRect = CGRectMake(s.width / 2.0, s.height, 0, 0);
         }
     }
+    // 6. Ограничиваем высоту листа — иначе дефолтный .large() растянет шторку
+    //    на весь экран (~95%), и полосе тайм-кодов сверху не останется места.
+    applySheetHeightCap(vc);
+
     [top presentViewController:vc animated:YES completion:nil];
 }
 
