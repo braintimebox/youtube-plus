@@ -117,7 +117,7 @@ static void applySheetHeightCap(UIActivityViewController *vc) {
         if (pc) {
             UISheetPresentationControllerDetent *hybrid =
                 [UISheetPresentationControllerDetent customDetentWithIdentifier:@"yt.hybrid"
-                                                                       resolver:^CGFloat (UISheetPresentationControllerContext *context) {
+                                                                       resolver:^CGFloat (id<UISheetPresentationControllerDetentResolutionContext> context) {
                     return context.maximumDetentValue * 0.62;
                 }];
             pc.detents = @[hybrid];
