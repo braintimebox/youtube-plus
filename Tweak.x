@@ -22,9 +22,24 @@
 + (UIViewController *)topViewControllerForPresenting;
 @end
 
+@interface YTSingleVideoController : NSObject
+@property (nonatomic, assign, readonly) CGFloat totalMediaTime;
+@end
+
+@interface YTPlayerViewController : UIViewController
+@property (nonatomic, assign, readonly) YTSingleVideoController *activeVideo;
+@end
+
 @interface YTMainAppVideoPlayerOverlayViewController : UIViewController
 @property (readonly, nonatomic) CGFloat mediaTime;
 @property (readonly, nonatomic) NSString *videoID;
+@end
+
+// Класс-расширение: так же объявлено в YTLite.h — parentViewController у
+// overlay контроллера имеет тип YTPlayerViewController *. Через него достаём
+// длительность видео (activeVideo.totalMediaTime) для слайдера селектора.
+@interface YTMainAppVideoPlayerOverlayViewController ()
+@property (nonatomic, weak, readwrite) YTPlayerViewController *parentViewController;
 @end
 
 // ── Фикс входа в Google: возвращаем реальную keychain access group из entitlements ──
@@ -90,14 +105,26 @@ static NSString *currentTimestampedURL(void) {
 }
 
 // Текущая позиция в формате mm:ss (или h:mm:ss).
-static NSString *currentTimestampLabel(void) {
-    YTMainAppVideoPlayerOverlayViewController *overlay = gLastPlayerOverlay;
-    if (!overlay) return nil;
-    NSInteger s = (NSInteger)overlay.mediaTime;
-    if (s < 0) return nil;
+
+// Форматирует произвольное число секунд в mm:ss / h:mm:ss.
+static NSString *formatSeconds(NSInteger s) {
+    if (s < 0) s = 0;
     if (s >= 3600)
         return [NSString stringWithFormat:@"%ld:%02ld:%02ld", (long)(s/3600), (long)((s%3600)/60), (long)(s%60)];
     return [NSString stringWithFormat:@"%ld:%02ld", (long)(s/60), (long)(s%60)];
+}
+
+// Длительность текущего видео — overlay.parentViewController.activeVideo.totalMediaTime.
+// 0, если плеер недоступен (тогда слайдер скрывается, остаётся текущий тайм-код).
+static NSTimeInterval currentDuration(void) {
+    YTMainAppVideoPlayerOverlayViewController *overlay = gLastPlayerOverlay;
+    if (!overlay) return 0;
+    YTPlayerViewController *player = overlay.parentViewController;
+    if (!player) return 0;
+    YTSingleVideoController *video = player.activeVideo;
+    if (!video) return 0;
+    NSTimeInterval d = video.totalMediaTime;
+    return (d > 0) ? d : 0;
 }
 
 // Ограничивает высоту листа, чтобы шторка не растягивалась на весь экран.
@@ -141,9 +168,12 @@ static void applySheetHeightCap(UIActivityViewController *vc) {
     cap.active = YES;
 }
 
-// Ключи ассоциированных объектов: тайм-кодовая ссылка и её подпись.
-static const char kYTTimecodeURLKey;
-static const char kYTTimecodeLabelKey;
+// Ключи ассоциированных объектов для селектора времени: сам item source,
+// базовая ссылка без &t, длительность видео и выбранные секунды (NSNumber).
+static const char kYTTimecodeItemKey;
+static const char kYTTimecodeBaseKey;
+static const char kYTTimecodeDurationKey;
+static const char kYTTimecodeSelectedKey;
 
 // ── Источник данных для системного share sheet ────────────────────────────────
 // Именно он заставляет iOS нарисовать нормальную верхнюю строку превью:
@@ -181,69 +211,159 @@ static const char kYTTimecodeLabelKey;
 
 @end
 
-// ── Полоса тайм-кодов внутри share sheet (tableHeaderView) ────────────────────
+// ── Селектор тайм-кода внутри share sheet — как в оригинальном YouTube ────────
+// Верхняя строка: «Начать с» + время + переключатель. Ниже — слайдер по
+// длительности видео. Переключатель и слайдер МЕНЯЮТ ССЫЛКУ, которую отдаст
+// системная шторка (через YTShareItemSource.item — он читается в момент
+// фактического шаринга, поэтому обновление подхватывается).
 @interface YTTimecodeStripView : UIView
-- (instancetype)initWithFrame:(CGRect)frame url:(NSString *)url label:(NSString *)label;
+@property (nonatomic, weak) YTShareItemSource *item;      // куда писать текущий URL
+@property (nonatomic, copy) NSString *baseURL;            // ссылка без &t
+@property (nonatomic, assign) NSTimeInterval duration;     // 0 => слайдер скрыт
+@property (nonatomic, assign) NSTimeInterval selected;     // выбранные секунды
+@property (nonatomic, strong) UILabel *timeLabel;
+@property (nonatomic, strong) UISlider *slider;
+@property (nonatomic, strong) UISwitch *toggle;
+@property (nonatomic, strong) NSLayoutConstraint *heightConstraint;
+- (void)applyHeightAnimated:(BOOL)animated;
 @end
 
 @implementation YTTimecodeStripView
 
-- (instancetype)initWithFrame:(CGRect)frame url:(NSString *)url label:(NSString *)label {
+// Высота: свёрнутая (только строка) и развёрнутая (со слайдером).
+static const CGFloat kYTCollapsedH = 52.0;
+static const CGFloat kYTExpandedH  = 104.0;
+
+- (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
     if (!self) return nil;
 
     // Непрозрачный фон обязателен: с clearColor полоса визуально сливалась
     // с системным контентом под ней и выглядела отсутствующей.
     self.backgroundColor = [UIColor systemGroupedBackgroundColor];
-    self.frame = CGRectMake(0, 0, frame.size.width, 56);
+    self.clipsToBounds = YES;
 
+    // Строка 1: «Начать с» | время | переключатель | копировать
     UILabel *caption = [[UILabel alloc] init];
     caption.translatesAutoresizingMaskIntoConstraints = NO;
-    caption.text = @"Тайм-код";
-    caption.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
-    caption.textColor = [UIColor secondaryLabelColor];
+    caption.text = @"Начать с";
+    caption.font = [UIFont systemFontOfSize:16 weight:UIFontWeightRegular];
 
     UILabel *value = [[UILabel alloc] init];
     value.translatesAutoresizingMaskIntoConstraints = NO;
-    value.text = label ?: @"—";
     value.font = [UIFont monospacedDigitSystemFontOfSize:17 weight:UIFontWeightSemibold];
     value.textAlignment = NSTextAlignmentRight;
 
-    UIImageView *chevron = [[UIImageView alloc] init];
-    chevron.translatesAutoresizingMaskIntoConstraints = NO;
-    chevron.contentMode = UIViewContentModeScaleAspectFit;
+    UIImageView *copyIcon = [[UIImageView alloc] init];
+    copyIcon.translatesAutoresizingMaskIntoConstraints = NO;
+    copyIcon.contentMode = UIViewContentModeScaleAspectFit;
+    copyIcon.tintColor = [UIColor secondaryLabelColor];
     if (@available(iOS 13.0, *)) {
-        chevron.image = [UIImage systemImageNamed:@"doc.on.doc"];
-        chevron.tintColor = [UIColor secondaryLabelColor];
+        copyIcon.image = [UIImage systemImageNamed:@"doc.on.doc"];
     }
-    chevron.frame = CGRectMake(0, 0, 18, 18);
+    [copyIcon.widthAnchor constraintEqualToConstant:18].active = YES;
+    [copyIcon.heightAnchor constraintEqualToConstant:18].active = YES;
 
-    UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[caption, value, chevron]];
-    stack.translatesAutoresizingMaskIntoConstraints = NO;
-    stack.axis = UILayoutConstraintAxisHorizontal;
-    stack.spacing = 8;
-    stack.alignment = UIStackViewAlignmentCenter;
-    [stack setCustomSpacing:12 afterView:caption];
+    UISwitch *sw = [[UISwitch alloc] init];
+    sw.translatesAutoresizingMaskIntoConstraints = NO;
+    sw.on = YES;
 
-    [self addSubview:stack];
+    UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[caption, value, copyIcon, sw]];
+    row.translatesAutoresizingMaskIntoConstraints = NO;
+    row.axis = UILayoutConstraintAxisHorizontal;
+    row.alignment = UIStackViewAlignmentCenter;
+    row.spacing = 10;
+    [row setCustomSpacing:8 afterView:caption];
+
+    // Строка 2: слайдер по длительности
+    UISlider *sl = [[UISlider alloc] init];
+    sl.translatesAutoresizingMaskIntoConstraints = NO;
+    sl.minimumValue = 0;
+    sl.continuous = YES;
+
+    [self addSubview:row];
+    [self addSubview:sl];
+
     [NSLayoutConstraint activateConstraints:@[
-        [stack.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:16],
-        [stack.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-16],
-        [stack.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
-        [value.widthAnchor constraintGreaterThanOrEqualToConstant:70],
+        [row.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:16],
+        [row.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-16],
+        [row.topAnchor constraintEqualToAnchor:self.topAnchor constant:6],
+        [row.heightAnchor constraintEqualToConstant:40],
+
+        [value.widthAnchor constraintGreaterThanOrEqualToConstant:64],
+
+        [sl.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:16],
+        [sl.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-16],
+        [sl.topAnchor constraintEqualToAnchor:row.bottomAnchor constant:2],
     ]];
 
-    // Тап по полосе — копируем ссылку с тайм-кодом.
+    self.timeLabel = value;
+    self.slider = sl;
+    self.toggle = sw;
+    self.heightConstraint = [self.heightAnchor constraintEqualToConstant:kYTCollapsedH];
+    self.heightConstraint.active = YES;
+
+    [sw addTarget:self action:@selector(toggleChanged:) forControlEvents:UIControlEventValueChanged];
+    [sl addTarget:self action:@selector(sliderChanged:) forControlEvents:UIControlEventValueChanged];
+
+    // Тап по иконке копирования — копирует ТЕКУЩУЮ ссылку (с учётом слайдера).
     UITapGestureRecognizer *tap =
         [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(yt_copy:)];
-    [self addGestureRecognizer:tap];
-    self.userInteractionEnabled = YES;
-    objc_setAssociatedObject(tap, &kYTTimecodeURLKey, url, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    copyIcon.userInteractionEnabled = YES;
+    [copyIcon addGestureRecognizer:tap];
+
     return self;
 }
 
+// Выставляет значения извне и рисует согласованное состояние.
+- (void)configureWithItem:(YTShareItemSource *)item
+                  baseURL:(NSString *)baseURL
+                 duration:(NSTimeInterval)duration
+                 selected:(NSTimeInterval)selected {
+    self.item = item;
+    self.baseURL = baseURL;
+    self.duration = (duration > 1) ? duration : 0;
+    self.selected = MAX(0, selected);
+
+    BOOL haveSlider = (self.duration > 0);
+    self.slider.hidden = !haveSlider;
+    if (haveSlider) {
+        self.slider.minimumValue = 0;
+        self.slider.maximumValue = (float)self.duration;
+        self.slider.value = (float)MIN(self.selected, self.duration);
+    }
+    self.toggle.on = (self.selected > 0);
+    // Высота должна учитывать состояние toggle СРАЗУ, иначе при clipsToBounds
+    // слайдер окажется за пределами свёрнутого контейнера и будет обрезан.
+    [self applyHeightAnimated:NO];
+    [self refreshUI];
+}
+
+- (NSString *)currentURL {
+    if (!self.toggle.on || self.selected <= 0 || self.baseURL.length == 0)
+        return self.baseURL;
+    return [NSString stringWithFormat:@"%@&t=%lds", self.baseURL, (long)lround(self.selected)];
+}
+
+- (void)refreshUI {
+    self.timeLabel.text = formatSeconds((NSInteger)lround(self.selected));
+    // Пush текущую ссылку в item source — шторка отдаст именно её.
+    if (self.item) self.item.url = [self currentURL];
+}
+
+- (void)toggleChanged:(UISwitch *)sender {
+    [self applyHeightAnimated:YES];
+    [self refreshUI];
+}
+
+- (void)sliderChanged:(UISlider *)sender {
+    self.selected = lround(sender.value);
+    self.timeLabel.text = formatSeconds((NSInteger)self.selected);
+    [self refreshUI];
+}
+
 - (void)yt_copy:(UITapGestureRecognizer *)sender {
-    NSString *url = objc_getAssociatedObject(sender, &kYTTimecodeURLKey);
+    NSString *url = [self currentURL];
     if (url.length == 0) return;
     [UIPasteboard generalPasteboard].string = url;
     if (@available(iOS 10.0, *)) {
@@ -252,20 +372,32 @@ static const char kYTTimecodeLabelKey;
     }
 }
 
+- (void)applyHeightAnimated:(BOOL)animated {
+    BOOL expanded = self.toggle.on && self.duration > 0;
+    self.heightConstraint.constant = expanded ? kYTExpandedH : kYTCollapsedH;
+    if (animated) {
+        [UIView animateWithDuration:0.25
+                              delay:0
+                            options:UIViewAnimationOptionCurveEaseInOut
+                         animations:^{ [self layoutIfNeeded]; }
+                         completion:nil];
+    }
+}
+
 @end
 
 // Помечает, что полоса уже вставлена, чтобы не дублировать при каждой раскладке.
 static const char kYTStripAttachedKey;
 
-// Ставит полосу тайм-кодов внутрь share sheet. Не ищем таблицу — раньше это
-// не сработало (структура меню на iOS 27 неизвестна). Вешаем полосу прямо на
-// view контроллера, закрепив сверху: так она видна всегда.
-static void attachTimecodeStrip(UIActivityViewController *vc, NSString *url, NSString *label) {
-    if (url.length == 0) return;
+// Ставит селектор тайм-кода внутрь share sheet. Не ищем таблицу — раньше это
+// не сработало (структура меню на iOS 27 неизвестна). Вешаем прямо на view
+// контроллера, закрепив сверху: так он виден всегда.
+// Высоту держит сам селектор (heightConstraint), мы её не фиксируем.
+static void attachTimecodeStrip(UIActivityViewController *vc, YTShareItemSource *item,
+                                NSString *baseURL, NSTimeInterval duration, NSTimeInterval selected) {
+    if (baseURL.length == 0) return;
 
-    // Уже прикреплена — просто держим ПОВЕРХ системного контента.
-    // Раньше флаг хранил @YES, и полосу нельзя было поднять наверх: система
-    // добавляла свой content после нас и закрывала её.
+    // Уже прикреплена — держим ПОВЕРХ системного контента.
     UIView *existing = objc_getAssociatedObject(vc, &kYTStripAttachedKey);
     if (existing) {
         if (existing.superview == vc.view)
@@ -278,9 +410,8 @@ static void attachTimecodeStrip(UIActivityViewController *vc, NSString *url, NSS
     CGFloat w = vc.view.bounds.size.width;
     if (w <= 0) w = UIScreen.mainScreen.bounds.size.width;
 
-    YTTimecodeStripView *strip =
-        [[YTTimecodeStripView alloc] initWithFrame:CGRectMake(0, 0, w, 56)
-                                                url:url label:label];
+    YTTimecodeStripView *strip = [[YTTimecodeStripView alloc] initWithFrame:CGRectMake(0, 0, w, 52)];
+    [strip configureWithItem:item baseURL:baseURL duration:duration selected:selected];
     strip.translatesAutoresizingMaskIntoConstraints = NO;
     [vc.view addSubview:strip];
 
@@ -292,7 +423,6 @@ static void attachTimecodeStrip(UIActivityViewController *vc, NSString *url, NSS
         [strip.topAnchor constraintEqualToAnchor:guide.topAnchor],
         [strip.leadingAnchor constraintEqualToAnchor:vc.view.leadingAnchor],
         [strip.trailingAnchor constraintEqualToAnchor:vc.view.trailingAnchor],
-        [strip.heightAnchor constraintEqualToConstant:56],
     ]];
 
     objc_setAssociatedObject(vc, &kYTStripAttachedKey, strip, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -319,18 +449,23 @@ static void attachTimecodeStrip(UIActivityViewController *vc, NSString *url, NSS
 // ДО привязки к окну — тогда attach молча откладывался.
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
-    NSString *url = objc_getAssociatedObject(self, &kYTTimecodeURLKey);
-    if (url.length == 0) return;
-    attachTimecodeStrip(self, url, objc_getAssociatedObject(self, &kYTTimecodeLabelKey));
+    NSString *base = objc_getAssociatedObject(self, &kYTTimecodeBaseKey);
+    if (base.length == 0) return;
+    YTShareItemSource *item = objc_getAssociatedObject(self, &kYTTimecodeItemKey);
+    NSNumber *dur = objc_getAssociatedObject(self, &kYTTimecodeDurationKey);
+    NSNumber *sel = objc_getAssociatedObject(self, &kYTTimecodeSelectedKey);
+    attachTimecodeStrip(self, item, base, dur.doubleValue, sel.doubleValue);
 }
 
 - (void)viewDidLayoutSubviews {
     %orig;
-    NSString *url = objc_getAssociatedObject(self, &kYTTimecodeURLKey);
-    if (url.length == 0) return;
+    NSString *base = objc_getAssociatedObject(self, &kYTTimecodeBaseKey);
+    if (base.length == 0) return;
 
-    NSString *label = objc_getAssociatedObject(self, &kYTTimecodeLabelKey);
-    attachTimecodeStrip(self, url, label);
+    YTShareItemSource *item = objc_getAssociatedObject(self, &kYTTimecodeItemKey);
+    NSNumber *dur = objc_getAssociatedObject(self, &kYTTimecodeDurationKey);
+    NSNumber *sel = objc_getAssociatedObject(self, &kYTTimecodeSelectedKey);
+    attachTimecodeStrip(self, item, base, dur.doubleValue, sel.doubleValue);
 }
 
 %end
@@ -417,12 +552,24 @@ static NSString *extractUrlFromDescription(NSString *desc) {
                                          applicationActivities:nil];
     vc.excludedActivityTypes = @[UIActivityTypeAssignToContact, UIActivityTypePrint];
 
-    // 5. Полоса с текущим тайм-кодом — встраивается в сам share sheet.
-    //    Данные кладём в ассоциированные объекты, а вставку делаем в
-    //    viewDidLayoutSubviews — там view гарантированно построена.
-    objc_setAssociatedObject(vc, &kYTTimecodeURLKey, tsURL, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    objc_setAssociatedObject(vc, &kYTTimecodeLabelKey,
-                             currentTimestampLabel(), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    // 5. Селектор тайм-кода — встраивается в сам share sheet.
+    //    Ставим ТОЛЬКО для видео (watch/shorts): для playlist/channel/clip
+    //    выбор времени бессмыслен, и там просто родная шторка.
+    BOOL isVideo = ([baseURL containsString:@"/watch?v="] ||
+                    [baseURL containsString:@"/shorts/"]);
+    if (isVideo) {
+        NSTimeInterval cur = gLastPlayerOverlay ? gLastPlayerOverlay.mediaTime : 0;
+        if (cur < 0) cur = 0;
+
+        // item изначально несёт ссылку с тайм-кодом (если плеер активен) —
+        // как раньше. Селектор при открытии перезапишет item.url согласованно.
+        objc_setAssociatedObject(vc, &kYTTimecodeItemKey, item, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(vc, &kYTTimecodeBaseKey, baseURL, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(vc, &kYTTimecodeDurationKey,
+                                 @(currentDuration()), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(vc, &kYTTimecodeSelectedKey,
+                                 @(cur), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
 
     UIViewController *top = [%c(YTUIUtils) topViewControllerForPresenting];
     if (!top) return %orig;
