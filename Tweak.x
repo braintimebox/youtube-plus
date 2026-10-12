@@ -192,7 +192,9 @@ static const char kYTTimecodeLabelKey;
     self = [super initWithFrame:frame];
     if (!self) return nil;
 
-    self.backgroundColor = [UIColor clearColor];
+    // Непрозрачный фон обязателен: с clearColor полоса визуально сливалась
+    // с системным контентом под ней и выглядела отсутствующей.
+    self.backgroundColor = [UIColor systemGroupedBackgroundColor];
     self.frame = CGRectMake(0, 0, frame.size.width, 56);
 
     UILabel *caption = [[UILabel alloc] init];
@@ -260,7 +262,16 @@ static const char kYTStripAttachedKey;
 // view контроллера, закрепив сверху: так она видна всегда.
 static void attachTimecodeStrip(UIActivityViewController *vc, NSString *url, NSString *label) {
     if (url.length == 0) return;
-    if (objc_getAssociatedObject(vc, &kYTStripAttachedKey)) return;
+
+    // Уже прикреплена — просто держим ПОВЕРХ системного контента.
+    // Раньше флаг хранил @YES, и полосу нельзя было поднять наверх: система
+    // добавляла свой content после нас и закрывала её.
+    UIView *existing = objc_getAssociatedObject(vc, &kYTStripAttachedKey);
+    if (existing) {
+        if (existing.superview == vc.view)
+            [vc.view bringSubviewToFront:existing];
+        return;
+    }
     if (!vc.isViewLoaded) return;
     if (vc.view.window == nil) return;   // ещё не показан — попробуем при следующей раскладке
 
@@ -273,14 +284,18 @@ static void attachTimecodeStrip(UIActivityViewController *vc, NSString *url, NSS
     strip.translatesAutoresizingMaskIntoConstraints = NO;
     [vc.view addSubview:strip];
 
+    // Якорим по safeAreaLayoutGuide, а не по сырому верху view:
+    // сырой верх уходит под grabber и скруглённую шапку листа — полоса
+    // оказывалась выше видимой области и обрезалась.
+    UILayoutGuide *guide = vc.view.safeAreaLayoutGuide;
     [NSLayoutConstraint activateConstraints:@[
-        [strip.topAnchor constraintEqualToAnchor:vc.view.topAnchor],
+        [strip.topAnchor constraintEqualToAnchor:guide.topAnchor],
         [strip.leadingAnchor constraintEqualToAnchor:vc.view.leadingAnchor],
         [strip.trailingAnchor constraintEqualToAnchor:vc.view.trailingAnchor],
         [strip.heightAnchor constraintEqualToConstant:56],
     ]];
 
-    objc_setAssociatedObject(vc, &kYTStripAttachedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(vc, &kYTStripAttachedKey, strip, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
 // ── Запоминаем активный плеер (отсюда берём mediaTime + videoID) ──────────────
@@ -298,6 +313,16 @@ static void attachTimecodeStrip(UIActivityViewController *vc, NSString *url, NSS
 // (из других приложений) не трогаем: проверка по ключу ничего не находит и
 // функция выходит сразу.
 %hook UIActivityViewController
+
+// Гарантированный момент: к viewDidAppear окно уже привязано, поэтому
+// проверка window != nil пройдёт точно. viewDidLayoutSubviews может вызваться
+// ДО привязки к окну — тогда attach молча откладывался.
+- (void)viewDidAppear:(BOOL)animated {
+    %orig;
+    NSString *url = objc_getAssociatedObject(self, &kYTTimecodeURLKey);
+    if (url.length == 0) return;
+    attachTimecodeStrip(self, url, objc_getAssociatedObject(self, &kYTTimecodeLabelKey));
+}
 
 - (void)viewDidLayoutSubviews {
     %orig;
